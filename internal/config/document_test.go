@@ -87,6 +87,8 @@ func TestUpdateFailuresPreservePriorBytes(t *testing.T) {
 	}{
 		{"duplicate-section", "[default]\nregion = first\n[default]\nregion = second\n", "default", map[string]string{"region": "new"}, "default"},
 		{"duplicate-owned-key", "[default]\nazure_default_password = fake-private-marker\nazure_default_password = another-fake-secret\n", "default", map[string]string{"region": "new"}, "azure_default_password"},
+		{"duplicate-role-metadata", "[default]\naalogin_role_arn = arn:aws:iam::123456789012:role/First\naalogin_role_arn = arn:aws:iam::123456789012:role/Second\n", "default", map[string]string{"region": "new"}, "aalogin_role_arn"},
+		{"duplicate-source-profile", "[default]\nsource_profile = first\nsource_profile = second\n", "default", map[string]string{"region": "new"}, "source_profile"},
 		{"nested-scalar", "[default]\nregion =\n    child = preserved\n", "default", map[string]string{"region": "new"}, "region"},
 		{"multiline-value", "[default]\nregion = old\n", "default", map[string]string{"azure_default_password": "fake-private-marker\n[other]"}, "azure_default_password"},
 		{"section-injection", "[default]\nregion = old\n", "default]\n[other", map[string]string{"region": "new"}, ""},

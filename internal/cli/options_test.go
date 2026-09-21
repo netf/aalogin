@@ -115,3 +115,40 @@ func TestCompatibilityFlagsAndAliases(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusSelectionIgnoresEnvironmentUnlessProfileExplicit(t *testing.T) {
+	t.Setenv("AWS_PROFILE", "unrelated\n[invalid]")
+	for _, args := range [][]string{{"status"}, {"status", "--help"}} {
+		o, err := Parse(args, io.Discard)
+		if err != nil || !o.Status || o.ProfileExplicit {
+			t.Fatalf("status unexpectedly selected AWS_PROFILE: options=%+v err=%v", o, err)
+		}
+	}
+	for _, args := range [][]string{{"status", "-p", "selected"}, {"--profile=selected", "status"}} {
+		o, err := Parse(args, io.Discard)
+		if err != nil || !o.Status || !o.ProfileExplicit || o.Profile != "selected" {
+			t.Fatalf("explicit status selection lost: options=%+v err=%v", o, err)
+		}
+	}
+}
+
+func TestStatusRejectsLoginAndConfigurationFlags(t *testing.T) {
+	for _, args := range [][]string{
+		{"status", "status"}, {"status", "login"}, {"login"},
+		{"status", "--configure"}, {"status", "--all-profiles"},
+		{"status", "--force-refresh"}, {"status", "--credential-process"},
+		{"status", "--no-prompt"}, {"status", "--no-prompt=false"},
+		{"status", "--mode=cli"}, {"status", "--browser=chromium"},
+		{"status", "--timeout=1m"}, {"status", "--duration=1h"},
+		{"status", "--no-sandbox"}, {"status", "--no-verify-ssl"},
+		{"status", "--enable-chrome-network-service"},
+		{"status", "--enable-chrome-seamless-sso"},
+		{"status", "--no-disable-extensions"}, {"status", "--disable-gpu"},
+		{"status", "--trusted-login-host=example.com"}, {"status", "--version"},
+		{"--ensure"}, {"--verify"}, {"--select-role"},
+	} {
+		if _, err := Parse(args, io.Discard); err == nil {
+			t.Errorf("accepted conflicting invocation %q", args)
+		}
+	}
+}

@@ -53,6 +53,21 @@ var ownedKeys = map[string]bool{
 	"aws_secret_access_key":        true,
 	"aws_session_token":            true,
 	"aws_expiration":               true,
+	"aalogin_role_arn":             true,
+	"source_profile":               true,
+	"role_arn":                     true,
+	"external_id":                  true,
+	"role_session_name":            true,
+	"duration_seconds":             true,
+	"credential_source":            true,
+	"credential_process":           true,
+	"mfa_serial":                   true,
+	"web_identity_token_file":      true,
+	"sso_session":                  true,
+	"sso_start_url":                true,
+	"sso_region":                   true,
+	"sso_account_id":               true,
+	"sso_role_name":                true,
 }
 
 // Load reads a shared INI file. A missing file is an empty document, while all
@@ -228,6 +243,17 @@ func indentation(text string) int {
 // values contain both Azure identifiers. Environment values do not qualify an
 // unrelated AWS, SSO, or service section for all-profile login.
 func (d *Document) AzureProfiles() ([]string, error) {
+	return d.profileNames(false)
+}
+
+// LoginProfileNames includes file-backed Entra roots and role-chain candidates.
+// Invalid candidates remain visible so resolution can report their errors.
+// Environment overrides never enroll unrelated sections.
+func (d *Document) LoginProfileNames() ([]string, error) {
+	return d.profileNames(true)
+}
+
+func (d *Document) profileNames(includeRoles bool) ([]string, error) {
 	var names []string
 	for _, sec := range d.sections {
 		name := ""
@@ -245,7 +271,9 @@ func (d *Document) AzureProfiles() ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if values["azure_tenant_id"] != "" && values["azure_app_id_uri"] != "" {
+		_, hasSource := values["source_profile"]
+		_, hasRole := values["role_arn"]
+		if (values["azure_tenant_id"] != "" && values["azure_app_id_uri"] != "") || (includeRoles && (hasSource || hasRole)) {
 			names = append(names, name)
 		}
 	}

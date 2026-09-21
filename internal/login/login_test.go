@@ -14,6 +14,7 @@ import (
 
 	"aalogin/internal/browser"
 	"aalogin/internal/cli"
+	"aalogin/internal/config"
 	"aalogin/internal/saml"
 	"aalogin/internal/sts"
 )
@@ -140,30 +141,120 @@ func TestFreshBoundary(t *testing.T) {
 		t.Fatal("incomplete credentials skipped")
 	}
 }
-func TestAllProfilesSkipAndForce(t *testing.T) {
-	r, b, _, _, path := fixture(t)
-	text := "[fixture]\naws_access_key_id=a\naws_secret_access_key=b\naws_session_token=c\naws_expiration=" + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + "\n"
-	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
-		t.Fatal(err)
-	}
-	o := cli.Options{AllProfiles: true, Mode: "cli", NoPrompt: true, Timeout: time.Second}
-	if err := r.Run(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	if b.calls != 0 {
-		t.Fatal("fresh credentials renewed")
-	}
-	o.ForceRefresh = true
-	if err := r.Run(context.Background(), o); err != nil {
-		t.Fatal(err)
-	}
-	if b.calls != 1 {
-		t.Fatal("force did not refresh")
+func TestLoginReusesCacheUntilForced(t *testing.T) {
+	for _, all := range []bool{false, true} {
+		t.Run(map[bool]string{false: "single", true: "all"}[all], func(t *testing.T) {
+			r, b, out, _, path := fixture(t)
+			text := "[fixture]\naws_access_key_id=a\naws_secret_access_key=b\naws_session_token=c\naws_expiration=" + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + "\n"
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			o := cli.Options{Profile: "fixture", AllProfiles: all, Mode: "cli", NoPrompt: true, Timeout: time.Second}
+			if err := r.Run(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, []byte(text)) || out.Len() != 0 || b.calls != 0 {
+				t.Fatalf("fresh cache was not reused without writes: %v", err)
+			}
+			o.ForceRefresh = true
+			if err := r.Run(context.Background(), o); err != nil {
+				t.Fatal(err)
+			}
+			if b.calls != 1 {
+				t.Fatal("force did not refresh")
+			}
+		})
 	}
 }
 func TestStaleDefaultDoesNotSwitchRole(t *testing.T) {
 	_, err := selectRole(context.Background(), []saml.Role{{RoleARN: "arn:aws:iam::123456789012:role/one"}}, "arn:aws:iam::123456789012:role/two", &cli.Prompt{NoPrompt: true})
 	if err == nil {
 		t.Fatal("stale default switched role")
+	}
+}
+
+func TestProcessReusesCacheWithoutWriting(t *testing.T) {
+	r, b, out, _, path := fixture(t)
+	text := "[fixture]\naws_access_key_id=cached-access\naws_secret_access_key=cached-secret\naws_session_token=cached-token\naws_expiration=" + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + "\n"
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := r.Run(context.Background(), cli.Options{Profile: "fixture", CredentialProcess: true, Timeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result processCredentials
+	if err := json.Unmarshal(out.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.AccessKeyID != "cached-access" || result.SessionToken != "cached-token" || b.calls != 0 {
+		t.Fatal("process did not return the cached session")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != text {
+		t.Fatal("process changed the credentials file")
+	}
+}
+
+func TestChangedConfiguredRoleDoesNotReuseOldPrivileges(t *testing.T) {
+	r, b, _, _, path := fixture(t)
+	t.Setenv("AZURE_DEFAULT_ROLE_ARN", "arn:aws:iam::123456789012:role/example")
+	text := "[fixture]\naws_access_key_id=old-access\naws_secret_access_key=old-secret\naws_session_token=old-token\naalogin_role_arn=arn:aws:iam::123456789012:role/old-role\naws_expiration=" + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + "\n"
+	if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Run(context.Background(), cli.Options{Profile: "fixture", NoPrompt: true, Timeout: time.Second}); err != nil {
+		t.Fatal(err)
+	}
+	doc, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, err := doc.Values("fixture")
+	if err != nil || values["aws_access_key_id"] == "old-access" || values["aalogin_role_arn"] != "arn:aws:iam::123456789012:role/example" || b.calls != 1 {
+		t.Fatalf("stale role binding reused: %v", err)
+	}
+}
+
+type fixtureRoleAccess struct {
+	err error
+}
+
+func (f fixtureRoleAccess) Assume(context.Context, sts.Credentials, config.RoleStep, sts.TransportOptions) (sts.Credentials, error) {
+	return sts.Credentials{AccessKeyID: "target-access", SecretAccessKey: "target-secret", SessionToken: "target-token", Expiration: time.Now().Add(time.Hour)}, f.err
+}
+
+func (f fixtureRoleAccess) Identity(context.Context, sts.Credentials, string, sts.TransportOptions) (sts.Identity, error) {
+	return sts.Identity{Account: "987654321012", ARN: "arn:aws:sts::987654321012:assumed-role/target/session"}, f.err
+}
+
+func TestTargetLoginPreservesSourceAndNeverStoresTargetCredentials(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "denied"}[fail], func(t *testing.T) {
+			r, b, out, _, path := fixture(t)
+			if err := config.Update(context.Background(), os.Getenv("AWS_CONFIG_FILE"), "profile target", map[string]string{
+				"source_profile": "fixture", "role_arn": "arn:aws:iam::987654321012:role/target", "region": "us-east-1",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			text := "[fixture]\naws_access_key_id=cached-access\naws_secret_access_key=cached-secret\naws_session_token=cached-token\naws_expiration=" + time.Now().Add(time.Hour).UTC().Format(time.RFC3339) + "\n"
+			if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+				t.Fatal(err)
+			}
+			access := fixtureRoleAccess{}
+			if fail {
+				access.err = errors.New("access denied")
+			}
+			r.roles = access
+			err := r.Run(context.Background(), cli.Options{Profile: "target", NoPrompt: true, Timeout: time.Second})
+			if (err != nil) != fail {
+				t.Fatalf("target result: %v", err)
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil || string(after) != text || b.calls != 0 || out.Len() != 0 {
+				t.Fatalf("target operation mutated cached credentials or authenticated again: %v", readErr)
+			}
+		})
 	}
 }

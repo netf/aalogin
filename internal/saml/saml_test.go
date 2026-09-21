@@ -211,8 +211,35 @@ func TestRoleRegionPartition(t *testing.T) {
 		if err := ValidateRoleRegion(role, item.region); err != nil {
 			t.Fatal(err)
 		}
+		if err := ValidateIAMRoleRegion(role.RoleARN, item.region); err != nil {
+			t.Fatal(err)
+		}
 		if err := ValidateRoleRegion(role, "cn-other-1"); (err == nil) != (item.partition == "aws-cn") {
 			t.Fatalf("partition validation: %v", err)
 		}
+	}
+}
+
+func TestStandaloneRoleRegionRejectsInvalidRoles(t *testing.T) {
+	for _, arn := range []string{
+		provider,
+		"arn:aws:iam::123:role/Test",
+		"arn:aws-other:iam::123456789012:role/Test",
+		"arn:aws-cn:iam::123456789012:role/Test",
+		"arn:aws:iam::123456789012:role/",
+		"arn:aws:iam::123456789012:role/path/",
+		"arn:aws:iam::123456789012:role/invalid*name",
+		"arn:aws:iam::123456789012:role/" + strings.Repeat("x", 65),
+		"arn:aws:iam::123456789012:role/" + strings.Repeat("x", 512) + "/Name",
+	} {
+		if err := ValidateIAMRoleRegion(arn, "us-east-1"); err == nil {
+			t.Errorf("accepted invalid standalone role %q", arn)
+		}
+	}
+	if err := ValidateIAMRoleRegion("arn:aws:iam::123456789012:role/team/subteam/Role_+=,.@-", "us-east-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRoleRegion(Role{RoleARN: roleA, PrincipalARN: strings.Replace(provider, "123456789012", "999999999999", 1)}, "us-east-1"); err == nil {
+		t.Fatal("standalone role validation bypassed SAML provider account validation")
 	}
 }

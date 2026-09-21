@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"aalogin/internal/saml"
 )
 
 type Paths struct {
@@ -57,6 +59,24 @@ type Profile struct {
 	DurationHours string
 	Region        string
 	RememberMe    bool
+}
+
+// RoleStep describes one AssumeRole request, using the preceding source's credentials.
+type RoleStep struct {
+	Name            string
+	RoleARN         string
+	SourceProfile   string
+	Region          string
+	ExternalID      string
+	RoleSessionName string
+	DurationSeconds int32
+}
+
+// LoginProfile resolves a selected profile to its Entra source and ordered role chain.
+type LoginProfile struct {
+	Name   string
+	Source Profile
+	Steps  []RoleStep
 }
 
 // Profile loads a selected shared-config profile, applying nonempty lowercase
@@ -231,4 +251,121 @@ func ResolveRegion(p Profile) string {
 		return p.Region
 	}
 	return "us-east-1"
+}
+
+// ResolveLoginProfile validates the entire source_profile graph before login.
+// Role steps are returned in execution order, from the Entra source to the target.
+func (d *Document) ResolveLoginProfile(name string) (LoginProfile, error) {
+	result := LoginProfile{Name: name}
+	seen := make(map[string]bool)
+	current := name
+	for {
+		if err := validateProfileName(current); err != nil {
+			return LoginProfile{}, err
+		}
+		if seen[current] {
+			return LoginProfile{}, fmt.Errorf("%s: source_profile cycle at profile [%s]", d.path, ConfigSection(current))
+		}
+		seen[current] = true
+		sectionName := ConfigSection(current)
+		sec, err := d.findSection(sectionName)
+		if err != nil {
+			return LoginProfile{}, err
+		}
+		if sec == nil {
+			return LoginProfile{}, fmt.Errorf("%s: profile [%s] does not exist", d.path, sectionName)
+		}
+		values, err := d.Values(sectionName)
+		if err != nil {
+			return LoginProfile{}, err
+		}
+		fail := func(message string) (LoginProfile, error) {
+			return LoginProfile{}, fmt.Errorf("%s: section [%s]: %s", d.path, sectionName, message)
+		}
+		_, hasSource := values["source_profile"]
+		_, hasRole := values["role_arn"]
+		for _, key := range []string{
+			"credential_source", "mfa_serial", "web_identity_token_file",
+			"sso_session", "sso_start_url", "sso_region", "sso_account_id", "sso_role_name",
+			"aws_access_key_id", "aws_secret_access_key", "aws_session_token",
+		} {
+			if _, exists := values[key]; exists {
+				return fail(key + " authentication is unsupported for Entra login")
+			}
+		}
+		if !hasSource && !hasRole {
+			if len(result.Steps) > 0 && (values["azure_tenant_id"] == "" || values["azure_app_id_uri"] == "") {
+				return fail("source_profile chain must end in a file-backed Entra profile")
+			}
+			result.Source, err = d.Profile(current)
+			if err != nil {
+				return LoginProfile{}, err
+			}
+			for left, right := 0, len(result.Steps)-1; left < right; left, right = left+1, right-1 {
+				result.Steps[left], result.Steps[right] = result.Steps[right], result.Steps[left]
+			}
+			return result, nil
+		}
+		if _, exists := values["credential_process"]; exists {
+			return fail("credential_process authentication is unsupported on role-chain profiles")
+		}
+		for key := range values {
+			if strings.HasPrefix(key, "azure_") {
+				return fail("ambiguous Entra and source_profile/role_arn authentication")
+			}
+		}
+		if !hasSource || !hasRole || values["source_profile"] == "" || values["role_arn"] == "" {
+			return fail("role-chain profiles require nonempty source_profile and role_arn")
+		}
+		step, err := parseRoleStep(current, values)
+		if err != nil {
+			return fail(err.Error())
+		}
+		result.Steps = append(result.Steps, step)
+		current = step.SourceProfile
+	}
+}
+
+var roleSessionPattern = regexp.MustCompile(`^[A-Za-z0-9_+=,.@-]{2,64}$`)
+var externalIDPattern = regexp.MustCompile(`^[A-Za-z0-9_+=,.@:/-]+$`)
+var secondsPattern = regexp.MustCompile(`^[0-9]+$`)
+
+func parseRoleStep(name string, values map[string]string) (RoleStep, error) {
+	step := RoleStep{
+		Name:            name,
+		RoleARN:         values["role_arn"],
+		SourceProfile:   values["source_profile"],
+		Region:          ResolveRegion(Profile{Region: values["region"]}),
+		ExternalID:      values["external_id"],
+		RoleSessionName: "aalogin",
+		DurationSeconds: 3600,
+	}
+	if err := validateProfileName(step.SourceProfile); err != nil {
+		return RoleStep{}, fmt.Errorf("source_profile: %w", err)
+	}
+	if err := validateValue(step.Region); err != nil {
+		return RoleStep{}, fmt.Errorf("region: %w", err)
+	}
+	if err := saml.ValidateIAMRoleRegion(step.RoleARN, step.Region); err != nil {
+		return RoleStep{}, fmt.Errorf("role_arn: %w", err)
+	}
+	if value, exists := values["role_session_name"]; exists {
+		if !roleSessionPattern.MatchString(value) {
+			return RoleStep{}, fmt.Errorf("role_session_name must be 2 to 64 characters using letters, digits, or _+=,.@-")
+		}
+		step.RoleSessionName = value
+	}
+	if value, exists := values["external_id"]; exists {
+		if len(value) < 2 || len(value) > 1224 || !externalIDPattern.MatchString(value) {
+			return RoleStep{}, fmt.Errorf("external_id must be 2 to 1224 characters using letters, digits, or _+=,.@:/-")
+		}
+	}
+	if value, exists := values["duration_seconds"]; exists {
+		seconds, err := strconv.ParseInt(value, 10, 32)
+		if err != nil || !secondsPattern.MatchString(value) || seconds < 900 || seconds > 3600 {
+			return RoleStep{}, fmt.Errorf("duration_seconds must be whole seconds between 900 and 3600 for role chaining")
+		}
+		step.DurationSeconds = int32(seconds)
+	}
+	return step, nil
 }

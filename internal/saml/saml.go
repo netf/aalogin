@@ -283,6 +283,38 @@ func ValidateRoleRegion(role Role, region string) error {
 	if err != nil || providerKind != "saml-provider" || providerPartition != partition || providerAccount != account {
 		return errors.New("selected provider ARN does not match the role")
 	}
+	return validateRolePartition(partition, region)
+}
+
+// ValidateIAMRoleRegion validates a standalone IAM role and its AWS partition.
+func ValidateIAMRoleRegion(roleARN, region string) error {
+	partition, _, kind, err := parseIAMARN(roleARN)
+	if err != nil || kind != "role" {
+		return errors.New("selected role ARN is invalid")
+	}
+	nameStart := strings.LastIndex(roleARN, "/") + 1
+	name := roleARN[nameStart:]
+	if len(name) > 64 {
+		return errors.New("selected role ARN has an invalid role name")
+	}
+	for _, char := range name {
+		if !strings.ContainsRune("_+=,.@-", char) && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+			return errors.New("selected role ARN has an invalid role name")
+		}
+	}
+	path := roleARN[strings.Index(roleARN, ":role/")+len(":role") : nameStart]
+	if len(path) > 512 {
+		return errors.New("selected role ARN has an invalid role path")
+	}
+	for _, char := range path {
+		if char < '!' || char > '~' {
+			return errors.New("selected role ARN has an invalid role path")
+		}
+	}
+	return validateRolePartition(partition, region)
+}
+
+func validateRolePartition(partition, region string) error {
 	want := "aws"
 	if strings.HasPrefix(region, "us-gov-") {
 		want = "aws-us-gov"

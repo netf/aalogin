@@ -17,6 +17,7 @@ type Options struct {
 	NoSandbox, EnableChromeNetworkService, NoVerifySSL       bool
 	EnableChromeSeamlessSSO, NoDisableExtensions, DisableGPU bool
 	CredentialProcess, Help, Version                         bool
+	Status, ProfileExplicit                                  bool
 	Timeout, Duration                                        time.Duration
 	TrustedLoginHosts                                        []string
 }
@@ -25,8 +26,8 @@ func flags(o *Options) *pflag.FlagSet {
 	f := pflag.NewFlagSet("aalogin", pflag.ContinueOnError)
 	f.SetOutput(io.Discard)
 	f.StringVarP(&o.Profile, "profile", "p", "", "AWS profile (otherwise AWS_PROFILE, then default)")
-	f.BoolVarP(&o.AllProfiles, "all-profiles", "a", false, "Refresh all Azure profiles expiring within 11 minutes")
-	f.BoolVarP(&o.ForceRefresh, "force-refresh", "f", false, "Refresh even unexpired all-profile credentials")
+	f.BoolVarP(&o.AllProfiles, "all-profiles", "a", false, "Refresh file-backed Entra sources whose credentials expire within 11 minutes")
+	f.BoolVarP(&o.ForceRefresh, "force-refresh", "f", false, "Reauthenticate selected source profiles even when cached credentials remain valid")
 	f.BoolVarP(&o.Configure, "configure", "c", false, "Configure an Azure AWS profile without storing passwords")
 	f.StringVarP(&o.Mode, "mode", "m", "cli", "Authentication mode: cli, gui, or debug")
 	f.BoolVar(&o.NoPrompt, "no-prompt", false, "Never read terminal input")
@@ -39,7 +40,7 @@ func flags(o *Options) *pflag.FlagSet {
 	f.BoolVar(&o.CredentialProcess, "credential-process", false, "Emit AWS process credentials JSON; implies --no-prompt and requires cli mode")
 	f.StringVar(&o.Browser, "browser", "", "Chromium executable (otherwise CHROME_BIN, then PATH)")
 	f.DurationVar(&o.Timeout, "timeout", 5*time.Minute, "Overall authentication timeout (Go duration)")
-	f.DurationVar(&o.Duration, "duration", 0, "Override profile session duration (Go duration, whole seconds from 15m to 12h)")
+	f.DurationVar(&o.Duration, "duration", 0, "Session duration for a newly authenticated source; cached credentials are retained unless --force-refresh (whole seconds from 15m to 12h)")
 	f.StringArrayVar(&o.TrustedLoginHosts, "trusted-login-host", nil, "Additional exact HTTPS credential-filling hostname (repeatable)")
 	f.BoolVarP(&o.Help, "help", "h", false, "Show help")
 	f.BoolVar(&o.Version, "version", false, "Show version")
@@ -57,8 +58,21 @@ func Parse(args []string, stderr io.Writer) (Options, error) {
 	if err := f.Parse(args); err != nil {
 		return Options{}, err
 	}
-	if f.NArg() != 0 {
-		return Options{}, fmt.Errorf("positional arguments are not supported")
+	if f.NArg() > 1 || (f.NArg() == 1 && f.Arg(0) != "status") {
+		return Options{}, fmt.Errorf("only the positional command status is supported")
+	}
+	o.Status = f.NArg() == 1
+	o.ProfileExplicit = f.Changed("profile")
+	if o.Status {
+		var conflict string
+		f.Visit(func(flag *pflag.Flag) {
+			if conflict == "" && flag.Name != "profile" && flag.Name != "help" {
+				conflict = flag.Name
+			}
+		})
+		if conflict != "" {
+			return Options{}, fmt.Errorf("status cannot be combined with --%s; only --profile and --help apply", conflict)
+		}
 	}
 	if o.Mode != "cli" && o.Mode != "gui" && o.Mode != "debug" {
 		return Options{}, fmt.Errorf("--mode must be cli, gui, or debug")
@@ -81,11 +95,13 @@ func Parse(args []string, stderr io.Writer) (Options, error) {
 	if o.CredentialProcess && (o.AllProfiles || o.Mode != "cli") {
 		return Options{}, fmt.Errorf("--credential-process requires cli mode and cannot be combined with --all-profiles")
 	}
-	if o.Profile == "" {
-		o.Profile = os.Getenv("AWS_PROFILE")
-	}
-	if o.Profile == "" {
-		o.Profile = "default"
+	if !o.Status || o.ProfileExplicit {
+		if o.Profile == "" {
+			o.Profile = os.Getenv("AWS_PROFILE")
+		}
+		if o.Profile == "" {
+			o.Profile = "default"
+		}
 	}
 	if strings.ContainsAny(o.Profile, "\r\n[]") {
 		return Options{}, fmt.Errorf("profile name must not contain newlines or brackets")
@@ -122,7 +138,7 @@ func validHostname(host string) bool {
 func Help(out io.Writer) {
 	var o Options
 	f := flags(&o)
-	fmt.Fprintln(out, "Usage: aalogin [options]\n\nAuthenticate Microsoft Entra ID to AWS SAML and write temporary AWS credentials.\nAll prompts and progress use stderr. Normal login never prints credentials.")
+	fmt.Fprintln(out, "Usage: aalogin [options]\n       aalogin status [--profile NAME]\n\nAuthenticate Microsoft Entra ID to AWS SAML, reusing fresh source credentials.\nAll prompts and progress use stderr. Normal login never prints credentials.")
 	fmt.Fprintln(out, "\nOptions:")
 	fmt.Fprint(out, f.FlagUsages())
 	fmt.Fprintln(out, `
@@ -136,15 +152,25 @@ No browser is downloaded; install Chromium or specify --browser.
 --no-prompt never reads stdin; typed MFA requires an interactive invocation.
 
 Profiles and storage:
-  Reuses azure_* settings in ~/.aws/config; writes ~/.aws/credentials.
+  Reuses azure_* settings in ~/.aws/config; writes source ~/.aws/credentials.
   AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE override these paths.
   Configure with: aalogin --configure --profile NAME
   Configuration never writes passwords. Existing legacy password keys are kept.
-  All-profile renewal includes only profiles with tenant/app values in the file.
-  Only complete credentials expiring more than 11 minutes away are skipped.
+  Login follows source_profile role chains and reuses complete source credentials
+  expiring more than 11 minutes away. --force-refresh reauthenticates the source.
+  --duration applies only when authenticating a source, not to retained cache.
+  All-profile renewal includes only file-backed Entra sources, not target roles.
+  Target role credentials are not written to the shared credentials file.
+
+Local status:
+  aalogin status lists all candidate profiles, regardless of AWS_PROFILE.
+  Use --profile NAME to inspect one profile and its source.
+  Reads only local config and credentials; never opens a browser or calls AWS.
+  Cached roles and expiration are local metadata, not verified AWS access.
 
 Browser privacy:
-  Every login owns an isolated Chromium process; the normal browser is untouched.
+  Every browser authentication owns an isolated Chromium process; your normal
+  browser is untouched. Fresh cached source credentials need no browser.
   Remember-me stores sensitive session cookies under
   $XDG_STATE_HOME/aalogin/browser (default ~/.local/state/aalogin/browser).
   These private directories are not an encryption guarantee. Existing
@@ -161,11 +187,11 @@ AWS credential_process configuration:
   [profile NAME]
   credential_process = /absolute/path/to/aalogin --profile NAME --credential-process
 
-Process mode emits exactly one AWS credentials JSON object on stdout, obtains
-fresh credentials without writing the AWS credentials file, and never opens a
-visible browser. Existing static credentials for the consumer profile take
-precedence: deliberately remove them yourself if using credential_process.
-aalogin never removes those credentials automatically.
+Process mode emits exactly one AWS credentials JSON object on stdout, reuses
+fresh source credentials, and never writes the AWS credentials file or opens a
+visible browser. --force-refresh reauthenticates the source. Existing static
+credentials for the consumer profile take precedence: deliberately remove them
+yourself if using credential_process. aalogin never removes them automatically.
 
 Exit status: 0 success/help/version; 2 usage/configuration error;
 1 authentication/network/persistence failure; 130 SIGINT; 143 SIGTERM.`)

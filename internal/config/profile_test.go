@@ -194,3 +194,133 @@ func TestRegionPrecedence(t *testing.T) {
 		t.Fatalf("profile region was ignored: %q", got)
 	}
 }
+
+func TestResolveLoginProfileOrdersChainsFromEntraSource(t *testing.T) {
+	clearLegacyEnvironment(t)
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	doc, err := Load(fixtureFile(t, "[profile rsg]\nazure_tenant_id = example.onmicrosoft.com\nazure_app_id_uri = urn:example\ncredential_process = aalogin --profile rsg --credential-process\n[profile cni]\nsource_profile = rsg\nrole_arn = arn:aws:iam::123456789012:role/CNI\n[profile deployment]\nsource_profile = cni\nrole_arn = arn:aws:iam::210987654321:role/Deployment\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name  string
+		roles []string
+	}{
+		{"rsg", nil},
+		{"cni", []string{"arn:aws:iam::123456789012:role/CNI"}},
+		{"deployment", []string{"arn:aws:iam::123456789012:role/CNI", "arn:aws:iam::210987654321:role/Deployment"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			profile, err := doc.ResolveLoginProfile(test.name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if profile.Source.Name != "rsg" || profile.Name != test.name {
+				t.Fatalf("resolved wrong source/target: %s -> %s", profile.Source.Name, profile.Name)
+			}
+			var roles []string
+			source := profile.Source.Name
+			for _, step := range profile.Steps {
+				if step.SourceProfile != source {
+					t.Fatalf("broken execution order: %s follows %s", step.Name, source)
+				}
+				source = step.Name
+				roles = append(roles, step.RoleARN)
+			}
+			if !reflect.DeepEqual(roles, test.roles) {
+				t.Fatalf("role execution order: got %v, want %v", roles, test.roles)
+			}
+		})
+	}
+}
+
+func TestResolveLoginProfileRejectsInvalidGraphsAndAuthentication(t *testing.T) {
+	clearLegacyEnvironment(t)
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	root := "[profile rsg]\nazure_tenant_id = example.onmicrosoft.com\nazure_app_id_uri = urn:example\n"
+	role := "role_arn = arn:aws:iam::123456789012:role/CNI\n"
+	for _, test := range []struct {
+		name    string
+		content string
+	}{
+		{"self-cycle", "[profile cni]\nsource_profile = cni\n" + role},
+		{"indirect-cycle", "[profile cni]\nsource_profile = middle\n" + role + "[profile middle]\nsource_profile = cni\n" + role},
+		{"missing-source", "[profile cni]\nsource_profile = absent\n" + role},
+		{"missing-source-setting", "[profile cni]\n" + role},
+		{"missing-role-setting", "[profile cni]\nsource_profile = rsg\n"},
+		{"empty-source", "[profile cni]\nsource_profile =\n" + role},
+		{"non-entra-root", "[profile cni]\nsource_profile = unrelated\n" + role + "[profile unrelated]\nregion = us-east-1\n"},
+		{"root-role-ambiguity", "[profile cni]\nsource_profile = rsg\n" + role + "azure_tenant_id = example.onmicrosoft.com\nazure_app_id_uri = urn:example\n"},
+		{"credential-source", "[profile cni]\nsource_profile = rsg\n" + role + "credential_source = Environment\n"},
+		{"mfa", "[profile cni]\nsource_profile = rsg\n" + role + "mfa_serial = arn:aws:iam::123456789012:mfa/example\n"},
+		{"web-identity", "[profile cni]\nsource_profile = rsg\n" + role + "web_identity_token_file = /private/token\n"},
+		{"process-on-step", "[profile cni]\nsource_profile = rsg\n" + role + "credential_process = other-command\n"},
+		{"sso-source", "[profile cni]\nsource_profile = rsg\n" + role + "sso_session = other\n"},
+		{"wrong-arn-kind", "[profile cni]\nsource_profile = rsg\nrole_arn = arn:aws:iam::123456789012:user/example\n"},
+		{"invalid-account", "[profile cni]\nsource_profile = rsg\nrole_arn = arn:aws:iam::123:role/example\n"},
+		{"unknown-partition", "[profile cni]\nsource_profile = rsg\nrole_arn = arn:unknown:iam::123456789012:role/example\n"},
+		{"partition-region-mismatch", "[profile cni]\nsource_profile = rsg\nrole_arn = arn:aws-cn:iam::123456789012:role/example\nregion = us-east-1\n"},
+		{"duplicate-source", "[profile cni]\nsource_profile = rsg\nsource_profile = other\n" + role},
+		{"duplicate-role", "[profile cni]\nsource_profile = rsg\n" + role + role},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			doc, err := Load(fixtureFile(t, root+test.content))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := doc.ResolveLoginProfile("cni"); err == nil {
+				t.Fatal("invalid graph or authentication was accepted")
+			}
+		})
+	}
+}
+
+func TestRoleStepRejectsInvalidRequestBeforeLogin(t *testing.T) {
+	clearLegacyEnvironment(t)
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	base := "[profile rsg]\nazure_tenant_id = example.onmicrosoft.com\nazure_app_id_uri = urn:example\n[profile cni]\nsource_profile = rsg\nrole_arn = arn:aws:iam::123456789012:role/CNI\n"
+	for _, setting := range []string{
+		"duration_seconds = 899", "duration_seconds = 3601",
+		"duration_seconds = 900.5", "duration_seconds =", "duration_seconds = 1e3",
+		"role_session_name = x", "role_session_name = fake-private-marker/invalid",
+		"external_id = x", "external_id = fake-private-marker invalid",
+	} {
+		doc, err := Load(fixtureFile(t, base+setting+"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := doc.ResolveLoginProfile("cni"); err == nil {
+			t.Fatalf("accepted invalid %s", strings.Split(setting, " =")[0])
+		} else if strings.Contains(err.Error(), "fake-private-marker") {
+			t.Fatal("request validation disclosed field contents")
+		}
+	}
+}
+
+func TestLoginProfileNamesDoesNotEnrollEnvironmentOnlyProfiles(t *testing.T) {
+	clearLegacyEnvironment(t)
+	t.Setenv("azure_tenant_id", "environment.onmicrosoft.com")
+	t.Setenv("AZURE_APP_ID_URI", "urn:environment")
+	doc, err := Load(fixtureFile(t, "[profile rsg]\nazure_tenant_id = file.onmicrosoft.com\nazure_app_id_uri = urn:file\n[profile cni]\nsource_profile = rsg\nrole_arn = arn:aws:iam::123456789012:role/CNI\n[profile incomplete-role]\nsource_profile =\n[profile unrelated]\nregion = us-east-1\n[profile tenant-only]\nazure_tenant_id = file.onmicrosoft.com\n[profile nested-only]\ns3 =\n  azure_tenant_id = nested.invalid\n  azure_app_id_uri = urn:nested\n  source_profile = rsg\n[services ignored]\nsource_profile = rsg\n[default]\nazure_tenant_id = file.onmicrosoft.com\nazure_app_id_uri = urn:file\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := doc.LoginProfileNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"cni", "default", "incomplete-role", "rsg"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("enumerated %v, want only file-backed candidates %v", names, want)
+	}
+	t.Setenv("AWS_REGION", "us-east-1")
+	inherited, err := Load(fixtureFile(t, "[profile cni]\nsource_profile = unrelated\nrole_arn = arn:aws:iam::123456789012:role/CNI\n[profile unrelated]\nregion = us-east-1\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inherited.ResolveLoginProfile("cni"); err == nil {
+		t.Fatal("environment credentials enrolled an unrelated source profile into an Entra chain")
+	}
+}

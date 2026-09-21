@@ -62,8 +62,11 @@ administrator, then log in:
 
 Existing valid `aws-azure-login` profiles can be used without reconfiguration.
 Profile selection is nonempty `--profile`, then `AWS_PROFILE`, then `default`.
-Normal login writes temporary credentials to the selected AWS credentials
-section. Progress and prompts go to stderr; credentials are not printed.
+Normal login reuses complete source credentials with more than 11 minutes left.
+Otherwise it authenticates and writes temporary credentials to the source AWS
+credentials section. `--force-refresh` explicitly starts a new session; no
+separate "ensure" mode is needed. Progress and prompts go to stderr; credentials
+are not printed.
 
 When multiple roles are offered, interactive login uses `fzf` if it is installed
 and stdin/stderr are terminals. Type to fuzzy-search role names, paths, account
@@ -73,12 +76,13 @@ changing credentials. The picker ignores `FZF_DEFAULT_OPTS`,
 Without `fzf`, login uses a numbered role prompt. A configured role, or a single
 available role, skips selection; a missing configured role remains an error.
 
-Login does not prompt for session duration. It requests 12 hours unless a
-profile/environment duration is set, with `--duration` taking highest precedence:
+When authentication is needed, login requests 12 hours without prompting unless
+a profile/environment duration is set. `--duration` takes highest precedence for
+the new session; it does not replace a valid cached session by itself:
 
 ```sh
-./bin/aalogin --profile work --duration 4h
-./bin/aalogin --profile work --duration 90m
+./bin/aalogin --profile work --force-refresh --duration 4h
+./bin/aalogin --profile work --force-refresh --duration 90m
 ```
 
 The override accepts whole seconds from `15m` to `12h` and is login-only, not a
@@ -86,6 +90,58 @@ The override accepts whole seconds from `15m` to `12h` and is login-only, not a
 the selected role/account, actual expiration in local time with UTC offset, and
 requested duration. AWS can limit the actual lifetime; duration-limit rejections
 include advice to request a shorter session, without automatic retries.
+
+### Source profiles and daily use
+
+An AWS role profile can refer to an Entra source:
+
+```ini
+[profile development]
+role_arn = arn:aws:iam::123456789012:role/CrossAccountDeveloper
+source_profile = work
+region = us-east-1
+```
+
+`aalogin --profile development` follows the chain, ensures the `work` session,
+assumes the target role, and verifies its AWS identity. Only the source session is
+written to `~/.aws/credentials`; AWS CLI/SDKs manage their own target sessions.
+Chained sessions default to one hour; `duration_seconds` on each role profile
+can request 900–3600 seconds. `external_id` and `role_session_name` are supported.
+Cycles, missing sources, conflicting authentication methods, and unsupported
+MFA/web-identity/SSO sources fail before browser authentication.
+
+For a work session, select the AWS profile in your shell:
+
+```sh
+export AWS_PROFILE=development
+aalogin
+aws sts get-caller-identity
+```
+
+The executable cannot change its parent shell's environment; `--profile` selects
+only that invocation. Keep the active AWS profile visible in your shell prompt,
+and prefer an explicit `--profile production` for one-off production commands.
+
+Set `azure_default_role_arn` on the Entra source to skip the role picker. Change
+it with the existing `aalogin --configure --profile work` flow; no extra role
+selection flag is needed. A cache bound to a different role is not reused.
+Older caches with no recorded role are checked against STS before reuse when a
+default role is configured. Cached credentials with no configured role remain
+locally checked only; use `--force-refresh` if AWS has revoked the session.
+
+### Local status
+
+```sh
+aalogin status
+aalogin status --profile development
+```
+
+Status reads local config and credentials only—no browser, AWS request, or file
+writes. It shows cached role metadata (or unknown), local expiry, remaining time,
+cache state, and each profile's source and configured target role/account.
+Without `--profile`, it lists all candidate profiles regardless of `AWS_PROFILE`.
+Local validity is not proof of AWS access; normal login to a target profile
+performs the live access check.
 
 | Mode | Behavior |
 | --- | --- |
@@ -177,9 +233,9 @@ resubmitting a password. Interactive input requires a TTY.
 Only profiles with tenant **and** app values in the config file qualify for
 `--all-profiles`; environment overrides do not enroll unrelated AWS profiles.
 Profiles run sequentially in sorted order and stop on the first failure, keeping
-earlier successes. Complete credentials are skipped only when their expiration
-is more than 11 minutes away. `--force-refresh` bypasses this check. Single-profile
-login always requests fresh credentials.
+earlier successes. As with single-profile login, complete source credentials are
+reused when their expiration is more than 11 minutes away and their role is
+compatible with the configured default. `--force-refresh` bypasses reuse.
 
 A configured role missing from the assertion is an error, not permission to
 silently choose another role. Requested session duration is never automatically
@@ -196,10 +252,11 @@ credential_process = /absolute/path/to/aalogin --profile work --credential-proce
 ```
 
 This mode emits exactly one AWS process-credentials JSON object on stdout,
-implies `--no-prompt`, and requires headless CLI mode. It neither writes the
-shared credentials file nor caches STS credentials. Each invocation requests new
-credentials; the consuming SDK manages their expiration. Remembered browser
-cookies may still be reused.
+implies `--no-prompt`, and requires headless CLI mode. It reuses fresh source
+credentials when present, otherwise authenticates; it never writes the shared
+credentials file. The consuming SDK manages returned credentials and expiry.
+For a role-chain profile, it returns the target credentials rather than the
+source credentials. Remembered browser cookies may still be reused.
 
 **Existing static credentials for the consumer profile take precedence.** Remove
 those deliberately if switching to process credentials; aalogin never deletes
