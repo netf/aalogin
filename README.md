@@ -305,8 +305,8 @@ tar -xzf aalogin-v0.1.0-linux-amd64.tar.gz
 
 Both workflows pin third-party actions to commit SHAs and disable persisted
 checkout credentials. CI has read-only repository permissions; only the release
-publishing job receives `contents: write`, and its GitHub token is exposed only
-to the publication step. No AWS/Entra credentials or other repository secrets
+publishing job receives `contents: write`. The `GH_TOKEN` environment variable is
+set only for the publication step. No AWS/Entra credentials or other repository secrets
 are needed. Release publication is not a live federation acceptance test.
 
 ## License
