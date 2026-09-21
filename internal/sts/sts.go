@@ -96,13 +96,20 @@ func safeExchangeError(err error) error {
 		if code == "" {
 			code = "service error"
 		}
+		hint := ""
+		if apiError.ErrorCode() == "ValidationError" {
+			message := apiError.ErrorMessage()
+			if strings.Contains(message, "DurationSeconds") || strings.Contains(message, "MaxSessionDuration") {
+				hint = "; request a shorter session with --duration 1h or lower azure_default_duration_hours in your configuration"
+			}
+		}
 		var requestError interface{ ServiceRequestID() string }
 		if errors.As(err, &requestError) {
 			if requestID := diagnosticToken(requestError.ServiceRequestID(), 128); requestID != "" {
-				return fmt.Errorf("STS AssumeRoleWithSAML failed: %s (request ID %s)", code, requestID)
+				return fmt.Errorf("STS AssumeRoleWithSAML failed: %s (request ID %s)%s", code, requestID, hint)
 			}
 		}
-		return fmt.Errorf("STS AssumeRoleWithSAML failed: %s", code)
+		return fmt.Errorf("STS AssumeRoleWithSAML failed: %s%s", code, hint)
 	}
 	var certificateError *tls.CertificateVerificationError
 	if errors.As(err, &certificateError) {

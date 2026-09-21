@@ -140,7 +140,7 @@ func TestDurationRequiresExactWholeSecondsWithinAWSLimits(t *testing.T) {
 		hours   string
 		seconds int32
 	}{
-		{".25", 900}, {"12", 43200}, {"0.28", 1008}, {"1.0025", 3609}, {"2.5e-1", 900},
+		{"", 43200}, {".25", 900}, {"12", 43200}, {"0.28", 1008}, {"1.0025", 3609}, {"2.5e-1", 900},
 	} {
 		seconds, err := (Profile{DurationHours: test.hours}).DurationSeconds()
 		if err != nil || seconds != test.seconds {

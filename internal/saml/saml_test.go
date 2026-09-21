@@ -36,7 +36,7 @@ func changeXML(assertion string, change func(string) string) string {
 }
 
 func TestAuthnRequestRoundTrip(t *testing.T) {
-	now := time.Date(2026, 1, 2, 3, 4, 5, 0, time.FixedZone("offset", 3600))
+	now := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.FixedZone("offset", 3600))
 	app := `https://example.invalid/app?first="one"&second=<two>`
 	login, err := BuildLoginURL("example.onmicrosoft.com", app, ACSURL("cn-north-1"), now)
 	if err != nil {
@@ -63,7 +63,11 @@ func TestAuthnRequestRoundTrip(t *testing.T) {
 	if err := xml.Unmarshal(request, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.XMLName.Space != protocolNamespace || decoded.Version != "2.0" || decoded.IsPassive != "false" || decoded.Issuer != app || decoded.AssertionConsumerServiceURL != "https://signin.amazonaws.cn/saml" || decoded.IssueInstant != now.UTC().Format(time.RFC3339Nano) || decoded.NameIDPolicy.Format != "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" {
+	// Entra requires a UTC .NET round-trip DateTime, not nine-digit nanoseconds.
+	if decoded.IssueInstant != "2026-01-02T02:04:05.1234567Z" {
+		t.Fatalf("IssueInstant must use Entra-compatible UTC precision: %q", decoded.IssueInstant)
+	}
+	if decoded.XMLName.Space != protocolNamespace || decoded.Version != "2.0" || decoded.IsPassive != "false" || decoded.Issuer != app || decoded.AssertionConsumerServiceURL != "https://signin.amazonaws.cn/saml" || decoded.NameIDPolicy.Format != "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress" {
 		t.Fatalf("AuthnRequest did not round-trip: %#v", decoded)
 	}
 	if !strings.HasPrefix(decoded.ID, "id") || len(decoded.ID) < 34 {
@@ -157,7 +161,7 @@ func TestSelectRoleExplainsIdentityCenterMismatch(t *testing.T) {
 	if err != nil || chosen.RoleARN != roleA {
 		t.Fatalf("mixed roles rejected a valid configured role: %#v, %v", chosen, err)
 	}
-	chosen, err = SelectRole(mixed, "", false, func([]Role, int) (int, error) { return 1, nil })
+	chosen, err = SelectRole(mixed, "", false, func([]Role) (int, error) { return 1, nil })
 	if err != nil || chosen.RoleARN != roleA {
 		t.Fatalf("mixed roles rejected an interactive valid role: %#v, %v", chosen, err)
 	}
@@ -174,24 +178,22 @@ func TestSelectRoleDoesNotSilentlySwitchPrivileges(t *testing.T) {
 	if _, err := SelectRole(roles, "", true, nil); err == nil {
 		t.Fatal("no-prompt selected a role without a default")
 	}
-	chosen, err := SelectRole(roles, roleB, true, func([]Role, int) (int, error) { t.Fatal("no-prompt requested input"); return 0, nil })
+	chosen, err := SelectRole(roles, roleB, true, func([]Role) (int, error) { t.Fatal("no-prompt requested input"); return 0, nil })
 	if err != nil || chosen.RoleARN != roleB {
 		t.Fatalf("default role: %#v, %v", chosen, err)
 	}
-	chosen, err = SelectRole(roles, roleB, false, func(options []Role, index int) (int, error) {
-		if index != 1 || options[0] != roles[0] {
-			t.Fatal("incorrect choice defaults")
-		}
+	chosen, err = SelectRole(roles, roleB, false, func([]Role) (int, error) {
+		t.Fatal("configured role requested input")
 		return 0, nil
 	})
-	if err != nil || chosen.RoleARN != roleA {
-		t.Fatalf("interactive choice: %#v, %v", chosen, err)
+	if err != nil || chosen.RoleARN != roleB {
+		t.Fatalf("configured role: %#v, %v", chosen, err)
 	}
-	if _, err := SelectRole(roles, "", false, func([]Role, int) (int, error) { return len(roles), nil }); err == nil {
+	if _, err := SelectRole(roles, "", false, func([]Role) (int, error) { return len(roles), nil }); err == nil {
 		t.Fatal("out-of-range choice accepted")
 	}
 	cancel := errors.New("choice canceled")
-	if _, err := SelectRole(roles, "", false, func([]Role, int) (int, error) { return 0, cancel }); !errors.Is(err, cancel) {
+	if _, err := SelectRole(roles, "", false, func([]Role) (int, error) { return 0, cancel }); !errors.Is(err, cancel) {
 		t.Fatalf("lost choice cancellation: %v", err)
 	}
 }

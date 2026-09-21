@@ -65,6 +65,28 @@ Profile selection is nonempty `--profile`, then `AWS_PROFILE`, then `default`.
 Normal login writes temporary credentials to the selected AWS credentials
 section. Progress and prompts go to stderr; credentials are not printed.
 
+When multiple roles are offered, interactive login uses `fzf` if it is installed
+and stdin/stderr are terminals. Type to fuzzy-search role names, paths, account
+IDs, or partitions; use Up/Down and Enter to select, or Escape to cancel without
+changing credentials. The picker ignores `FZF_DEFAULT_OPTS`,
+`FZF_DEFAULT_OPTS_FILE`, and `FZF_DEFAULT_COMMAND` to keep selection predictable.
+Without `fzf`, login uses a numbered role prompt. A configured role, or a single
+available role, skips selection; a missing configured role remains an error.
+
+Login does not prompt for session duration. It requests 12 hours unless a
+profile/environment duration is set, with `--duration` taking highest precedence:
+
+```sh
+./bin/aalogin --profile work --duration 4h
+./bin/aalogin --profile work --duration 90m
+```
+
+The override accepts whole seconds from `15m` to `12h` and is login-only, not a
+`--configure` setting. Existing configured durations are unchanged. Success shows
+the selected role/account, actual expiration in local time with UTC offset, and
+requested duration. AWS can limit the actual lifetime; duration-limit rejections
+include advice to request a shorter session, without automatic retries.
+
 | Mode | Behavior |
 | --- | --- |
 | `--mode cli` (default) | Headless Chromium, with terminal prompts as needed. |
@@ -81,6 +103,11 @@ CAPTCHA, unsupported federation pages, or changed Microsoft selectors. Browser
 form automation is inherently sensitive to page changes; universal headless
 compatibility is not promised.
 
+If Entra reports `AADSTS7500510` for `IssueInstant`, rebuild with `make` and
+restart login using `./bin/aalogin`. Older builds emitted nanosecond timestamps;
+requests now use Entra's UTC .NET round-trip format (seven fractional digits).
+This timestamp fix does not require changes to your AWS profile configuration.
+
 ## AWS profile configuration
 
 Default files are `~/.aws/config` and `~/.aws/credentials`.
@@ -96,7 +123,7 @@ azure_app_id_uri = urn:example:aws
 azure_default_username = you@example.com
 azure_default_remember_me = true
 azure_default_role_arn = arn:aws:iam::123456789012:role/ExampleRole
-azure_default_duration_hours = 1
+azure_default_duration_hours = 12
 region = us-east-1
 ```
 
@@ -109,8 +136,8 @@ The default profile uses `[default]`, not `[profile default]`. Credentials use
 | `azure_app_id_uri` | Required app ID URI from the existing SAML setup. |
 | `azure_default_username` | Default username for terminal-driven login. |
 | `azure_default_password` | Legacy compatibility only; prefer an interactive prompt or environment value. |
-| `azure_default_role_arn` | Default role; required for unattended selection when multiple roles are offered. |
-| `azure_default_duration_hours` | Defaults to `1` when absent; decimal hours must convert to whole seconds in `900..43200` (15 minutes to 12 hours). AWS may impose a lower role limit. |
+| `azure_default_role_arn` | Selects this role without prompting; required for unattended selection when multiple roles are offered. |
+| `azure_default_duration_hours` | Defaults to `12` when absent; decimal hours must convert to whole seconds in `900..43200` (15 minutes to 12 hours). `--duration` overrides it for login. AWS may impose a lower role limit. |
 | `azure_default_remember_me` | Strict `true` / `false`; absent means `false`. |
 | `region` | AWS region; may be blank. |
 

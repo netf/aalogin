@@ -34,6 +34,9 @@ func TestRejectInvalidInvocations(t *testing.T) {
 		{"--unknown"}, {"positional"}, {"--", "positional"},
 		{"--mode", "browser"}, {"--mode", ""}, {"--timeout", "0"}, {"--timeout=-1s"}, {"--timeout", "tomorrow"},
 		{"-c", "-a"}, {"-c", "-f"}, {"-c", "--credential-process"},
+		{"--configure", "--duration", "4h"},
+		{"--duration", "0"}, {"--duration=-1s"}, {"--duration", "14m59s"},
+		{"--duration", "12h1s"}, {"--duration", "15m1ns"}, {"--duration", "tomorrow"},
 		{"-p", "selected", "-a"}, {"--profile=", "--all-profiles"},
 		{"--credential-process", "-a"}, {"--credential-process", "-m", "gui"}, {"--credential-process", "-m", "debug"},
 		{"-p", "bad\n[section]"},
@@ -45,6 +48,31 @@ func TestRejectInvalidInvocations(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			if _, err := Parse(args, io.Discard); err == nil {
 				t.Fatalf("accepted %q", args)
+			}
+		})
+	}
+}
+
+func TestDurationOverrideBoundaries(t *testing.T) {
+	t.Setenv("AWS_PROFILE", "")
+	for _, tc := range []struct {
+		value string
+		want  time.Duration
+	}{
+		{"", 0},
+		{"15m", 15 * time.Minute},
+		{"4h", 4 * time.Hour},
+		{"90m", 90 * time.Minute},
+		{"12h", 12 * time.Hour},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			var args []string
+			if tc.value != "" {
+				args = []string{"--duration", tc.value}
+			}
+			o, err := Parse(args, io.Discard)
+			if err != nil || o.Duration != tc.want {
+				t.Fatalf("duration = %v, err = %v; want %v", o.Duration, err, tc.want)
 			}
 		})
 	}

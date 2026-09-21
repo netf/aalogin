@@ -17,7 +17,7 @@ type Options struct {
 	NoSandbox, EnableChromeNetworkService, NoVerifySSL       bool
 	EnableChromeSeamlessSSO, NoDisableExtensions, DisableGPU bool
 	CredentialProcess, Help, Version                         bool
-	Timeout                                                  time.Duration
+	Timeout, Duration                                        time.Duration
 	TrustedLoginHosts                                        []string
 }
 
@@ -39,6 +39,7 @@ func flags(o *Options) *pflag.FlagSet {
 	f.BoolVar(&o.CredentialProcess, "credential-process", false, "Emit AWS process credentials JSON; implies --no-prompt and requires cli mode")
 	f.StringVar(&o.Browser, "browser", "", "Chromium executable (otherwise CHROME_BIN, then PATH)")
 	f.DurationVar(&o.Timeout, "timeout", 5*time.Minute, "Overall authentication timeout (Go duration)")
+	f.DurationVar(&o.Duration, "duration", 0, "Override profile session duration (Go duration, whole seconds from 15m to 12h)")
 	f.StringArrayVar(&o.TrustedLoginHosts, "trusted-login-host", nil, "Additional exact HTTPS credential-filling hostname (repeatable)")
 	f.BoolVarP(&o.Help, "help", "h", false, "Show help")
 	f.BoolVar(&o.Version, "version", false, "Show version")
@@ -64,6 +65,12 @@ func Parse(args []string, stderr io.Writer) (Options, error) {
 	}
 	if o.Timeout <= 0 {
 		return Options{}, fmt.Errorf("--timeout must be positive")
+	}
+	if f.Changed("duration") && (o.Duration < 15*time.Minute || o.Duration > 12*time.Hour || o.Duration%time.Second != 0) {
+		return Options{}, fmt.Errorf("--duration must be whole seconds between 15m and 12h")
+	}
+	if o.Configure && f.Changed("duration") {
+		return Options{}, fmt.Errorf("--configure cannot be combined with --duration")
 	}
 	if o.Configure && (o.AllProfiles || o.CredentialProcess || o.ForceRefresh) {
 		return Options{}, fmt.Errorf("--configure cannot be combined with --all-profiles, --credential-process, or --force-refresh")

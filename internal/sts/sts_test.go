@@ -111,6 +111,50 @@ func TestExchangeRejectsIncompleteResponsesAndKeepsDiagnosticsSafe(t *testing.T)
 	}
 }
 
+func TestExchangeClassifiesDurationRejectionsWithoutLeakingOrRetrying(t *testing.T) {
+	isolatedTransport(t)
+	const secret = "DO_NOT_PRINT_ASSERTION_PASSWORD_SESSION_TOKEN"
+	for _, item := range []struct {
+		name       string
+		code       string
+		message    string
+		wantAdvice bool
+	}{
+		{"duration seconds limit", "ValidationError", "The requested DurationSeconds exceeds the session limit: " + secret, true},
+		{"role session limit", "ValidationError", "Requested session exceeds the role MaxSessionDuration: " + secret, true},
+		{"unrelated validation", "ValidationError", "Invalid role ARN: " + secret, false},
+		{"unrelated error code", "InvalidIdentityToken", "Invalid assertion mentioning DurationSeconds: " + secret, false},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "text/xml")
+				w.WriteHeader(http.StatusBadRequest)
+				fmt.Fprintf(w, `<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Sender</Type><Code>%s</Code><Message>%s</Message></Error><RequestId>fixture-request-123</RequestId></ErrorResponse>`, item.code, item.message)
+			}))
+			defer server.Close()
+			credentials, err := (Client{endpoint: server.URL}).Exchange(context.Background(), secret, fixtureRole, 43200, "us-east-1", TransportOptions{})
+			if err == nil || credentials != (Credentials{}) {
+				t.Fatalf("unsuccessful exchange yielded credentials: %#v, %v", credentials, err)
+			}
+			diagnostic := err.Error()
+			if strings.Contains(diagnostic, secret) || strings.Contains(diagnostic, item.message) {
+				t.Fatalf("raw service message in diagnostic: %v", err)
+			}
+			if !strings.Contains(diagnostic, item.code) || !strings.Contains(diagnostic, "fixture-request-123") {
+				t.Fatalf("missing safe error metadata: %v", err)
+			}
+			if strings.Contains(diagnostic, "--duration 1h") != item.wantAdvice || strings.Contains(diagnostic, "azure_default_duration_hours") != item.wantAdvice {
+				t.Fatalf("incorrect duration advice: %v", err)
+			}
+			if requests.Load() != 1 {
+				t.Fatalf("rejected exchange retried: %d requests", requests.Load())
+			}
+		})
+	}
+}
+
 func TestExchangeRefusesRedirectAndInvalidInputs(t *testing.T) {
 	isolatedTransport(t)
 	var forwarded atomic.Int32

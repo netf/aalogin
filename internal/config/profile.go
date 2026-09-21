@@ -102,7 +102,7 @@ func (d *Document) profile(name string, allowMissing bool) (Profile, error) {
 		if _, exists := values["azure_default_duration_hours"]; exists {
 			return Profile{}, fmt.Errorf("%s: section [%s]: azure_default_duration_hours must not be empty", d.path, sectionName)
 		}
-		profile.DurationHours = "1"
+		profile.DurationHours = "12"
 	}
 	if value, exists := values["azure_default_remember_me"]; exists {
 		switch value {
@@ -192,7 +192,7 @@ func validateValue(value string) error {
 func (p Profile) DurationSeconds() (int32, error) {
 	value := p.DurationHours
 	if value == "" {
-		value = "1"
+		value = "12"
 	}
 	invalid := func() (int32, error) {
 		return 0, fmt.Errorf("azure_default_duration_hours must represent whole seconds between 900 and 43200 (0.25 to 12 hours)")

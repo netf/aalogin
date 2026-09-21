@@ -69,9 +69,10 @@ func BuildLoginURL(tenant, appID, acs string, now time.Time) (string, error) {
 	if _, err := rand.Read(randomID[:]); err != nil {
 		return "", errors.New("cannot generate SAML request ID")
 	}
+	// Entra expects the UTC .NET round-trip format with seven fractional digits.
 	request, err := xml.Marshal(authnRequest{
 		ID: "id" + hex.EncodeToString(randomID[:]), Version: "2.0",
-		IssueInstant: now.UTC().Format(time.RFC3339Nano), IsPassive: "false",
+		IssueInstant: now.UTC().Format("2006-01-02T15:04:05.0000000Z"), IsPassive: "false",
 		AssertionConsumerServiceURL: acs, Issuer: appID,
 		NameIDPolicy: nameIDPolicy{Format: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"},
 	})
@@ -294,8 +295,9 @@ func ValidateRoleRegion(role Role, region string) error {
 	return nil
 }
 
-// SelectRole uses zero-based indexes for choose; -1 means there is no configured default.
-func SelectRole(roles []Role, defaultARN string, noPrompt bool, choose func([]Role, int) (int, error)) (Role, error) {
+// SelectRole uses a configured role or the only available role without prompting.
+// Otherwise choose returns a zero-based index.
+func SelectRole(roles []Role, defaultARN string, noPrompt bool, choose func([]Role) (int, error)) (Role, error) {
 	if len(roles) == 0 {
 		return Role{}, errors.New("SAML response contains no AWS IAM roles")
 	}
@@ -323,16 +325,16 @@ func SelectRole(roles []Role, defaultARN string, noPrompt bool, choose func([]Ro
 	if len(roles) == 1 {
 		return roles[0], nil
 	}
-	if noPrompt {
-		if defaultIndex == -1 {
-			return Role{}, errors.New("multiple roles require azure_default_role_arn; rerun without --no-prompt to select a role")
-		}
+	if defaultIndex >= 0 {
 		return roles[defaultIndex], nil
+	}
+	if noPrompt {
+		return Role{}, errors.New("multiple roles require azure_default_role_arn; rerun without --no-prompt to select a role")
 	}
 	if choose == nil {
 		return Role{}, errors.New("interaction required; rerun without --no-prompt")
 	}
-	index, err := choose(roles, defaultIndex)
+	index, err := choose(roles)
 	if err != nil {
 		return Role{}, err
 	}

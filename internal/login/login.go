@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"time"
 
 	"aalogin/internal/browser"
@@ -100,10 +99,11 @@ func (r *Runner) Run(ctx context.Context, o cli.Options) error {
 		if err = r.warnLegacyPassword(doc, p.Name); err != nil {
 			return invalid(err)
 		}
-		creds, e := r.authenticate(ctx, o, p, prompt)
+		session, e := r.authenticate(ctx, o, p, prompt)
 		if e != nil {
 			return fmt.Errorf("profile %s: %w", p.Name, e)
 		}
+		creds := session.credentials
 		if err = ctx.Err(); err != nil {
 			return err
 		}
@@ -113,7 +113,9 @@ func (r *Runner) Run(ctx context.Context, o cli.Options) error {
 		if e = config.Update(ctx, paths.Credentials, p.Name, map[string]string{"aws_access_key_id": creds.AccessKeyID, "aws_secret_access_key": creds.SecretAccessKey, "aws_session_token": creds.SessionToken, "aws_expiration": creds.Expiration.UTC().Format(time.RFC3339)}); e != nil {
 			return e
 		}
-		fmt.Fprintf(r.Err, "%s: credentials expire %s\n", p.Name, creds.Expiration.UTC().Format(time.RFC3339))
+		fmt.Fprintf(r.Err, "%s: authenticated as %s\nExpires %s · requested %gh\n",
+			p.Name, roleLabel(session.role), creds.Expiration.Local().Format("02 Jan 2006, 15:04:05 MST (UTC-07:00)"),
+			float64(session.duration)/3600)
 	}
 	return nil
 }
@@ -146,8 +148,22 @@ func fresh(v map[string]string, now time.Time) bool {
 	expiration, err := time.Parse(time.RFC3339, v["aws_expiration"])
 	return err == nil && expiration.After(now.Add(11*time.Minute))
 }
-func (r *Runner) authenticate(ctx context.Context, o cli.Options, p config.Profile, prompt *cli.Prompt) (sts.Credentials, error) {
-	var empty sts.Credentials
+
+type loginSession struct {
+	credentials sts.Credentials
+	role        saml.Role
+	duration    int32
+}
+
+func (r *Runner) authenticate(ctx context.Context, o cli.Options, p config.Profile, prompt *cli.Prompt) (loginSession, error) {
+	var empty loginSession
+	duration, err := p.DurationSeconds()
+	if o.Duration != 0 {
+		duration = int32(o.Duration / time.Second)
+	}
+	if err != nil {
+		return empty, invalid(err)
+	}
 	region := config.ResolveRegion(p)
 	loginURL, err := saml.BuildLoginURL(p.Tenant, p.AppID, saml.ACSURL(region), r.now())
 	if err != nil {
@@ -163,6 +179,9 @@ func (r *Runner) authenticate(ctx context.Context, o cli.Options, p config.Profi
 	if err != nil {
 		return empty, err
 	}
+	if len(roles) > 1 && p.RoleARN == "" && !prompt.NoPrompt {
+		fmt.Fprintf(r.Err, "AWS login · %s\n", p.Name)
+	}
 	role, err := selectRole(ctx, roles, p.RoleARN, prompt)
 	if err != nil {
 		return empty, err
@@ -170,35 +189,9 @@ func (r *Runner) authenticate(ctx context.Context, o cli.Options, p config.Profi
 	if err = saml.ValidateRoleRegion(role, region); err != nil {
 		return empty, err
 	}
-	if !prompt.NoPrompt {
-		p.DurationHours, err = prompt.Read(ctx, "Session duration (hours)", p.DurationHours, false)
-		if err != nil {
-			return empty, err
-		}
-	}
-	duration, err := p.DurationSeconds()
+	creds, err := r.sts.Exchange(ctx, assertion, role, duration, region, sts.TransportOptions{NoVerifySSL: o.NoVerifySSL})
 	if err != nil {
-		return empty, invalid(err)
+		return empty, err
 	}
-	return r.sts.Exchange(ctx, assertion, role, duration, region, sts.TransportOptions{NoVerifySSL: o.NoVerifySSL})
-}
-func selectRole(ctx context.Context, roles []saml.Role, def string, prompt *cli.Prompt) (saml.Role, error) {
-	return saml.SelectRole(roles, def, prompt.NoPrompt, func(roles []saml.Role, index int) (int, error) {
-		for i, role := range roles {
-			fmt.Fprintf(prompt.Out, "%d: %s\n", i+1, role.RoleARN)
-		}
-		seed := ""
-		if index >= 0 {
-			seed = strconv.Itoa(index + 1)
-		}
-		text, err := prompt.Read(ctx, "Role number", seed, false)
-		if err != nil {
-			return 0, err
-		}
-		n, err := strconv.Atoi(text)
-		if err != nil {
-			return 0, errors.New("invalid role number")
-		}
-		return n - 1, nil
-	})
+	return loginSession{credentials: creds, role: role, duration: duration}, nil
 }
