@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Linux amd64 checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          unformatted=$(gofmt -l cmd internal)
+          if [[ -n "$unformatted" ]]; then
+            printf 'Run make fmt to format:\n%s\n' "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet and race-enabled tests
+        run: make check
+
+      - name: Real browser integration
+        shell: bash
+        run: |
+          chrome=$(command -v google-chrome)
+          "$chrome" --version
+          make integration CHROME_BIN="$chrome"
+
+      - name: Build and smoke-test static executable
+        shell: bash
+        run: |
+          make build
+          test "$(./bin/aalogin --version)" = dev
+          ./bin/aalogin --help
+          file bin/aalogin
+
+      - name: Upload Linux amd64 executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: aalogin-linux-amd64
+          path: bin/aalogin
+          if-no-files-found: error
+          retention-days: 7

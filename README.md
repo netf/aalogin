@@ -1,5 +1,7 @@
 # aalogin
 
+[![CI](https://github.com/netf/aalogin/actions/workflows/ci.yml/badge.svg)](https://github.com/netf/aalogin/actions/workflows/ci.yml)
+
 A Linux Go CLI for Microsoft Entra ID → AWS SAML federation. It reuses
 `aws-azure-login` profile settings, drives an isolated Chromium session, and
 exchanges the resulting SAML assertion for temporary AWS credentials.
@@ -261,6 +263,51 @@ when performing that acceptance, and never print credentials or assertions.
 Code is split into `cmd/aalogin` and `internal/{cli,config,browser,saml,sts,login,transport}`.
 Browser acquisition and STS exchange are the fixture substitution boundaries;
 there are no production endpoint or TLS test-bypass flags.
+
+## GitHub Actions and releases
+
+[CI](.github/workflows/ci.yml) runs on pushes to `main`, pull requests, and manual
+dispatch. It checks formatting, runs `make check` (vet and race-enabled tests),
+runs real-browser fixtures using the Ubuntu runner's installed Google Chrome,
+and builds and smoke-tests the static Linux amd64 executable. Successful runs
+retain an `aalogin-linux-amd64` build artifact for seven days. CI artifacts may
+need `chmod +x aalogin` after download; release archives preserve executable mode.
+The Go version comes from `go.mod`.
+
+[Release](.github/workflows/release.yml) runs when a `vMAJOR.MINOR.PATCH` tag is
+pushed. It first runs the same CI workflow against the tagged commit. Only after
+those checks pass does it build a versioned binary and publish a GitHub Release
+with generated notes and these assets:
+
+- `aalogin-vMAJOR.MINOR.PATCH-linux-amd64.tar.gz` containing `aalogin`, `README.md`,
+  and `LICENSE`.
+- `checksums.txt` containing the archive's SHA-256 checksum.
+
+To publish a release after reviewing the commit to tag:
+
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+The tag is embedded verbatim in `aalogin --version`. Only stable numeric version
+tags are supported; prerelease tags are rejected. Existing releases are not
+overwritten by rerunning the workflow.
+
+After downloading both release assets into the same directory, verify before
+extracting:
+
+```sh
+sha256sum --check checksums.txt
+tar -xzf aalogin-v0.1.0-linux-amd64.tar.gz
+./aalogin --version
+```
+
+Both workflows pin third-party actions to commit SHAs and disable persisted
+checkout credentials. CI has read-only repository permissions; only the release
+publishing job receives `contents: write`, and its GitHub token is exposed only
+to the publication step. No AWS/Entra credentials or other repository secrets
+are needed. Release publication is not a live federation acceptance test.
 
 ## License
 

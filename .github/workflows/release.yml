@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    name: Release checks
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish Linux amd64 release
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo 'Release tags must use vMAJOR.MINOR.PATCH (for example v1.0.0).'
+            exit 1
+          fi
+
+      - name: Check out tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and package release
+        shell: bash
+        run: |
+          make build VERSION="$RELEASE_TAG"
+          test "$(./bin/aalogin --version)" = "$RELEASE_TAG"
+          ./bin/aalogin --help
+          package_dir="$RUNNER_TEMP/release"
+          mkdir -p "$package_dir"
+          archive="aalogin-${RELEASE_TAG}-linux-amd64.tar.gz"
+          tar -czf "$package_dir/$archive" -C bin aalogin -C "$GITHUB_WORKSPACE" README.md LICENSE
+          cd "$package_dir"
+          sha256sum "$archive" > checksums.txt
+          sha256sum --check checksums.txt
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          gh release create "$RELEASE_TAG" \
+            "$RUNNER_TEMP/release/aalogin-${RELEASE_TAG}-linux-amd64.tar.gz" \
+            "$RUNNER_TEMP/release/checksums.txt" \
+            --verify-tag --title "$RELEASE_TAG" --generate-notes
